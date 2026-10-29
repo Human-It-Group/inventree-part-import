@@ -309,8 +309,11 @@ def get_preferred_document_url(product_files: dict[str, Any], product_symbol: st
         document
         for document in as_list(documents.get("elements"))
         if isinstance(document, dict) and get_document_url(document)
+        # local patch: 'LNK' documents are .txt link stubs (not datasheets) - let other suppliers provide one
+        and document.get("type") != "LNK"
+        and not get_document_url(document).lower().endswith(".txt")
     ]
-    preferred_types = ("DTE", "PDF", "DS", "DATASHEET", "LNK")
+    preferred_types = ("DTE", "PDF", "DS", "DATASHEET")
 
     if product_symbol:
         matched_documents = [
@@ -391,23 +394,33 @@ class TMEV2Api:
         endpoint = "products"
 
         for query_param in ("symbols[]", "mpns[]"):
-            products = self._get_response_elements(
-                endpoint,
-                self._api_call(
-                    "GET",
+            # local patch: TME rejects symbols outside 2..18 chars with a validation error
+            # (instead of an empty result) - skip that query and fall through to the MPN lookup
+            if query_param == "symbols[]" and not 2 <= len(product_symbol) <= 18:
+                continue
+            try:
+                products = self._get_response_elements(
                     endpoint,
-                    [
-                        ("country", self.country),
-                        (query_param, product_symbol),
-                    ],
-                ),
-            )
+                    self._api_call(
+                        "GET",
+                        endpoint,
+                        [
+                            ("country", self.country),
+                            (query_param, product_symbol),
+                        ],
+                    ),
+                )
+            except SupplierError:
+                continue
 
             exact_matches = [product for product in products if is_exact_product_match(product, product_symbol)]
             if len(exact_matches) == 1:
                 return exact_matches[0]
 
-        search_products = self.product_search(product_symbol)
+        try:
+            search_products = self.product_search(product_symbol)
+        except SupplierError:
+            search_products = []
         exact_matches = [
             product for product in search_products if is_exact_product_match(product, product_symbol)
         ]
