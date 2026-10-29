@@ -79,7 +79,13 @@ class PartImporter:
 
         for supplier, async_results in search_results:
             info(f"searching at {supplier.name} ...")
-            results, result_count = async_results.get()
+            # local patch (upstream issue #106): one supplier failing must not abort the whole import
+            try:
+                results, result_count = async_results.get()
+            except Exception as e:
+                warning(f"search at {supplier.name} failed: {type(e).__name__}: {e}")
+                import_result |= ImportResult.INCOMPLETE
+                continue
 
             if not results:
                 hint(f"no results at {supplier.name}")
@@ -355,7 +361,9 @@ class PartImporter:
 
         existing_parameters = {
             parameter.template_detail["name"]: parameter
-            for parameter in Parameter.list(self.api, part=part.pk)
+            # local patch: InvenTree >= 1.x ignores the legacy 'part' filter on /parameter/ and returns
+            # ALL parameters -> updates landed on other parts. Filter by model_type/model_id instead.
+            for parameter in Parameter.list(self.api, model_type="part.part", model_id=part.pk)
         }
 
         matched_parameters: dict[str, str] = {}
@@ -479,7 +487,7 @@ def create_parameter(
 ):
     try:
         Parameter.create(
-            inventree_api, {"part": part.pk, "template": parameter_template.pk, "data": value}
+            inventree_api, {"model_type": "part.part", "model_id": part.pk, "template": parameter_template.pk, "data": value}
         )
     except HTTPError as e:
         msg = e.args[0]["body"]
