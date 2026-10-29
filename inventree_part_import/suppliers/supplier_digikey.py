@@ -1,7 +1,7 @@
 from typing import Any
 
 from error_helper import error
-from oauthlib.oauth2 import BackendApplicationClient
+from oauthlib.oauth2 import BackendApplicationClient, TokenExpiredError
 from requests.compat import quote
 from requests.exceptions import HTTPError, JSONDecodeError, Timeout
 from requests_oauthlib import OAuth2Session
@@ -63,7 +63,8 @@ class DigiKey(Supplier):
             for product in result["Products"]
             if product["ManufacturerProductNumber"].lower().startswith(search_term.lower())
         ]
-        return list(map(self.get_api_part, products)), result["ProductsCount"]
+        # local patch: DigiKey omits ProductsCount when there are no results
+        return list(map(self.get_api_part, products)), result.get("ProductsCount", len(products))
 
     def get_api_part(self, product_details: dict[str, Any], digikey_part_number: str | None = None):
         if digikey_part_number:
@@ -125,6 +126,7 @@ class DigiKeyApi:
     ):
         oauth_client = BackendApplicationClient(client_id)
         self.session = setup_session(OAuth2Session(client=oauth_client))
+        self._client_secret = client_secret
         self.session.fetch_token(self.OAUTH2_TOKEN_URL, client_secret=client_secret)  # pyright: ignore[reportUnknownMemberType]
 
         headers = {
@@ -149,7 +151,16 @@ class DigiKeyApi:
         result = None
 
         try:
-            result = self.session.get(url) if json is None else self.session.post(url, json=json)
+            # local patch: client-credentials tokens expire after ~10 min and are not refreshed
+            # automatically - fetch a new token and retry once
+            try:
+                result = self.session.get(url) if json is None else self.session.post(url, json=json)
+            except TokenExpiredError:
+                self.session.fetch_token(self.OAUTH2_TOKEN_URL, client_secret=self._client_secret)  # pyright: ignore[reportUnknownMemberType]
+                result = self.session.get(url) if json is None else self.session.post(url, json=json)
+            if result.status_code == 401:
+                self.session.fetch_token(self.OAUTH2_TOKEN_URL, client_secret=self._client_secret)  # pyright: ignore[reportUnknownMemberType]
+                result = self.session.get(url) if json is None else self.session.post(url, json=json)
             if result.status_code == 404 and result.json()["title"] == "Not Found":
                 return result
             result.raise_for_status()
